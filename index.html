@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualiseur PDF - Livre 3D Interactif</title>
+    
+    <style>
+        /* ==========================================================================
+           CSS : Style Global et Conteneurs
+           ========================================================================== */
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #2c2f33;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden; /* Désactive le scroll natif de la page web */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #loader {
+            color: #ffffff;
+            font-size: 1.2rem;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        /* Conteneur principal du livre, caché pendant le chargement du PDF */
+        #book-wrapper {
+            display: none;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Style individuel pour chaque page du livre */
+        .page {
+            background-color: #ffffff;
+            /* Léger ombrage interne pour simuler le pli de la reliure */
+            box-shadow: inset -2px 0 10px rgba(0,0,0,0.05), inset 2px 0 10px rgba(0,0,0,0.05);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        canvas {
+            /* S'assure que le canvas occupe tout l'espace de la page sans déborder */
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain; 
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/page-flip/dist/js/page-flip.browser.min.js"></script>
+</head>
+<body>
+
+    <div id="loader">
+        Extraction du document.pdf en cours...<br>
+        <small style="font-size: 0.8rem; color: #aaa;">Veuillez patienter.</small>
+    </div>
+
+    <div id="book-wrapper"></div>
+
+    <script>
+        /* ==========================================================================
+           JavaScript : Logique Applicative
+           ========================================================================== */
+        
+        // Configuration du worker PDF.js indispensable pour les performances
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // Variables globales
+        const pdfUrl = 'document.pdf';
+        let pageFlip;
+        
+        // Dimensions de référence pour les pages du livre
+        const PAGE_WIDTH = 450;
+        const PAGE_HEIGHT = 650;
+
+        /**
+         * Étape 1 : Initialisation et Chargement du PDF
+         */
+        async function loadPDF() {
+            try {
+                // Chargement asynchrone du document PDF
+                const loadingTask = pdfjsLib.getDocument(pdfUrl);
+                const pdf = await loadingTask.promise;
+                const numPages = pdf.numPages;
+                const container = document.getElementById('book-wrapper');
+
+                // Boucle pour extraire chaque page et la rendre dans un Canvas
+                for (let i = 1; i <= numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    
+                    // Calcul de l'échelle pour adapter le PDF à nos dimensions de page
+                    const unscaledViewport = page.getViewport({ scale: 1 });
+                    const scale = Math.min(PAGE_WIDTH / unscaledViewport.width, PAGE_HEIGHT / unscaledViewport.height);
+                    const viewport = page.getViewport({ scale: scale });
+
+                    // Création du conteneur de la page
+                    const pageDiv = document.createElement('div');
+                    pageDiv.className = 'page';
+
+                    // Création du Canvas pour dessiner la page
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+
+                    // Rendu de la page PDF dans le Canvas
+                    await page.render({
+                        canvasContext: context,
+                        viewport: viewport
+                    }).promise;
+
+                    // Ajout au DOM
+                    pageDiv.appendChild(canvas);
+                    container.appendChild(pageDiv);
+                }
+
+                // Une fois toutes les pages chargées, on masque le loader et on initialise le livre
+                document.getElementById('loader').style.display = 'none';
+                container.style.display = 'block';
+                
+                initPageFlip(container);
+
+            } catch (error) {
+                console.error("Erreur PDF:", error);
+                document.getElementById('loader').innerHTML = `
+                    <span style="color: #ff6b6b;">Erreur de chargement.</span><br>
+                    <small>Assurez-vous que 'document.pdf' est dans le même dossier.<br>
+                    Note : Si vous ouvrez ce fichier localement (file://), le navigateur bloquera le PDF (CORS).<br>
+                    Utilisez un serveur local (ex: Live Server sur VSCode).</small>
+                `;
+            }
+        }
+
+        /**
+         * Étape 2 : Initialisation du moteur de livre 3D (StPageFlip)
+         */
+        function initPageFlip(container) {
+            pageFlip = new St.PageFlip(container, {
+                width: PAGE_WIDTH,
+                height: PAGE_HEIGHT,
+                size: "fixed",         // Taille fixe (facilite la gestion des canvas)
+                showCover: true,       // La première et dernière page agissent comme une couverture
+                useMouseEvents: false, // DÉSACTIVÉ : On empêche le clic/drag pour tourner la page
+                useKeyboard: false,    // DÉSACTIVÉ : On désactive les flèches du clavier
+                flippingTime: 800      // Durée de l'animation de la page (en ms)
+            });
+
+            // On charge tous les éléments ".page" que nous venons de créer
+            pageFlip.loadFromHTML(document.querySelectorAll('.page'));
+            
+            // Activation du système de contrôle personnalisé
+            setupScrollInteractions();
+        }
+
+        /**
+         * Étape 3 : Interaction par Scroll UNIQUEMENT (avec Throttle)
+         */
+        function setupScrollInteractions() {
+            let isAnimating = false;
+            const throttleTime = 850; // Légèrement supérieur à flippingTime pour être sûr
+
+            // Fonction centralisée pour tourner les pages de manière sécurisée
+            const turnPage = (direction) => {
+                if (isAnimating) return; // Ignore la requête si une animation est en cours
+                
+                isAnimating = true;
+
+                if (direction === 'next') {
+                    pageFlip.flipNext();
+                } else if (direction === 'prev') {
+                    pageFlip.flipPrev();
+                }
+
+                // Libère le verrou une fois l'animation terminée
+                setTimeout(() => {
+                    isAnimating = false;
+                }, throttleTime);
+            };
+
+            // Écouteur 1 : Défilement avec la molette de la souris (Wheel)
+            window.addEventListener('wheel', (e) => {
+                // e.deltaY > 0 correspond à un scroll vers le bas
+                if (e.deltaY > 0) {
+                    turnPage('next');
+                } else if (e.deltaY < 0) {
+                    turnPage('prev');
+                }
+            });
+
+            // Écouteur 2 : Swipe tactile (Mobile/Tablette)
+            let touchStartY = 0;
+            window.addEventListener('touchstart', (e) => {
+                touchStartY = e.touches[0].clientY;
+            }, { passive: true });
+
+            window.addEventListener('touchend', (e) => {
+                const touchEndY = e.changedTouches[0].clientY;
+                const deltaY = touchStartY - touchEndY; 
+
+                // Un delta positif signifie un swipe vers le haut (équivalent scroll bas)
+                if (Math.abs(deltaY) > 40) { // Seuil de tolérance pour le swipe
+                    if (deltaY > 0) {
+                        turnPage('next');
+                    } else {
+                        turnPage('prev');
+                    }
+                }
+            }, { passive: true });
+        }
+
+        // Lancement du script au chargement de la page
+        document.addEventListener('DOMContentLoaded', loadPDF);
+
+    </script>
+</body>
+</html>
